@@ -17,7 +17,7 @@ namespace BotObserver;
 public class BotObserverPlugin : BasePlugin
 {
     public override string ModuleName => "Bot Observer";
-    public override string ModuleVersion => "1.2.2";
+    public override string ModuleVersion => "1.2.3";
     public override string ModuleAuthor => "CS2-Bot-Improver";
     public override string ModuleDescription => "Adds broadcast-style observer bots that appear as spectators on the scoreboard.";
 
@@ -44,6 +44,7 @@ public class BotObserverPlugin : BasePlugin
         AddCommandListener("bot_kick", OnBotKick, HookMode.Pre);
         RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
+        RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
 
         // Watchdog: BotHider builds with round-start respawn/team logic treat a
         // Spectator observer as a dead managed bot and pull it into T/CT, so
@@ -61,6 +62,35 @@ public class BotObserverPlugin : BasePlugin
     {
         LogObserverStateAtRoundStart();
         EnforceObservers();
+        return HookResult.Continue;
+    }
+
+    // Instant revert: a tracked observer must never stay out of Spectator.
+    // Round-start respawn logic in older BotHider builds SwitchTeams the shell
+    // and spawns a pawn for it; pull it back on the next frame so the window
+    // shrinks from ~1s (watchdog poll) to ~1 tick. Our own move to Spectator
+    // re-fires this event with team == Spectator and is ignored: no loop.
+    private HookResult OnPlayerTeam(EventPlayerTeam @event, GameEventInfo info)
+    {
+        if (@event.Team == (int)CsTeam.Spectator)
+            return HookResult.Continue;
+
+        // @event.Userid is the controller itself in this CSS version.
+        var subject = @event.Userid;
+        if (subject == null || !subject.IsValid || !subject.UserId.HasValue)
+            return HookResult.Continue;
+        if (!_observers.ContainsKey(subject.UserId.Value))
+            return HookResult.Continue;
+
+        Server.NextFrame(() =>
+        {
+            if (!subject.IsValid || subject.TeamNum == (int)CsTeam.Spectator)
+                return;
+            Logger.LogWarning("[BotObserver] Observer \"{Name}\" forced out of Spectator; moving back.",
+                subject.PlayerName);
+            subject.ChangeTeam(CsTeam.Spectator);
+            ApplyObserverState(subject);
+        });
         return HookResult.Continue;
     }
 

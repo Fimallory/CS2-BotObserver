@@ -8,6 +8,7 @@ A [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSharp) plugin 
 - Names resolve case-insensitively against the unified `bot_info.json` pool and the canonical spelling is always applied (`machinewjq` → `MachineWJQ`). Without a name, one is picked from the pool.
 - The shell is born with the final name so BotHider adopts it with the matching identity; 0.1 s after creation the bot's name and real SteamID (`bot_info.json` account id) are asserted through the BotHider API (`bothider:api`), then it is marked connected and switched to Spectator.
 - A 1 s watchdog re-asserts Spectator + SteamID for every tracked observer, so round-start respawn/team logic in older BotHider builds cannot keep an observer in T/CT.
+- Any team change pushing a tracked observer out of Spectator is reverted on the next frame via the `player_team` event.
 - Empty-shell observers never enter the managed-bot respawn/team lifecycle, so no BotHider registration is needed.
 - `bot_kick <name>` is intercepted to remove observers.
 - All diagnostics go through the managed `ILogger` — `Server.PrintToConsole` inside plugin callbacks crashes `cs2.exe` with an unhandled native exception, so it is never used here.
