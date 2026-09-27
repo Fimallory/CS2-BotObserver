@@ -7,7 +7,7 @@ A [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSharp) plugin 
 - `bot_add_spec [name]` creates an empty-shell fake client that **never joins T/CT**: the engine never sees a shorthanded team, so no compensation is ever granted to the opposing side, and there is no bot AI.
 - Names resolve case-insensitively against the unified `bot_info.json` pool and the canonical spelling is always applied (`machinewjq` → `MachineWJQ`). Without a name, one is picked from the pool.
 - 0.1 s after creation the bot is renamed through the BotHider API (`bothider:api`), marked connected, and switched to Spectator.
-- Observer slots are registered via `IBotHiderApi.SetObserverSlot` **before** any team work, so BotHider's round-start lifecycle never re-teams or respawns them.
+- Empty-shell observers never enter the managed-bot respawn/team lifecycle, so no BotHider registration is needed.
 - `bot_kick <name>` is intercepted to remove observers.
 - All diagnostics go through the managed `ILogger` — `Server.PrintToConsole` inside plugin callbacks crashes `cs2.exe` with an unhandled native exception, so it is never used here.
 
@@ -20,8 +20,7 @@ A [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSharp) plugin 
 
 ## Requirements (provided by the parent repo)
 
-- `BotHiderApi` shared project with observer-slot support (`SetObserverSlot` / `IsObserverSlot`) — referenced via the relative path `..\..\shared\BotHiderApi\BotHiderApi.csproj`.
-- `BotHiderImpl` build that honors observer slots in respawn / vote / team logic.
+- `BotHiderApi` shared project (`IBotHiderApi`: `IsManagedBot` / `SetPersonaName`) — referenced via the relative path `..\..\shared\BotHiderApi\BotHiderApi.csproj`.
 - `bot_info.json` unified name pool (Liquipedia players + casters).
 
 Because of the relative `ProjectReference`, this repo **builds as a submodule at its canonical path** inside a CS2-Bot-Improver checkout — a standalone clone does not contain `shared/BotHiderApi`. Targets net10.0 / CSS API 1.0.371.

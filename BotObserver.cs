@@ -154,7 +154,6 @@ public class BotObserverPlugin : BasePlugin
 
     private void OnClientDisconnect(int slot)
     {
-        UnregisterObserverSlot(slot);
         _pendingObservers.TryRemove(slot, out _);
 
         var stale = _observers
@@ -178,10 +177,8 @@ public class BotObserverPlugin : BasePlugin
             return;
         }
 
-        // Exclude the slot from BotHider's respawn/team lifecycle before any
-        // team work happens, so a round start can never pull the observer in.
-        RegisterObserverSlot(slot);
-
+        // Empty-shell fake clients live in Spectator from birth and never enter
+        // T/CT, so no BotHider registration is needed.
         ApplyObserverName(player, name);
         ApplyObserverState(player);
 
@@ -237,7 +234,6 @@ public class BotObserverPlugin : BasePlugin
         CCSPlayerController? player = null)
     {
         _pendingObservers.TryRemove(slot, out _);
-        UnregisterObserverSlot(slot);
         Logger.LogWarning("[BotObserver] Failed to create observer \"{Name}\": {Reason}.", name, reason);
 
         player ??= Utilities.GetPlayerFromSlot(slot);
@@ -269,24 +265,6 @@ public class BotObserverPlugin : BasePlugin
         }
     }
 
-    private void RegisterObserverSlot(int slot)
-    {
-        if (slot < 0)
-            return;
-
-        var api = new PluginCapability<IBotHiderApi>("bothider:api").Get();
-        api?.SetObserverSlot(slot, true);
-    }
-
-    private void UnregisterObserverSlot(int slot)
-    {
-        if (slot < 0)
-            return;
-
-        var api = new PluginCapability<IBotHiderApi>("bothider:api").Get();
-        api?.SetObserverSlot(slot, false);
-    }
-
     private void ApplyObserverName(CCSPlayerController player, string name)
     {
         if (player == null || !player.IsValid)
@@ -307,8 +285,6 @@ public class BotObserverPlugin : BasePlugin
 
     private void KickObserver(CCSPlayerController observer)
     {
-        UnregisterObserverSlot(observer.Slot);
-
         if (observer.UserId.HasValue)
             _observers.TryRemove(observer.UserId.Value, out _);
 
