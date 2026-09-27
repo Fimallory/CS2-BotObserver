@@ -17,11 +17,14 @@ namespace BotObserver;
 public class BotObserverPlugin : BasePlugin
 {
     public override string ModuleName => "Bot Observer";
-    public override string ModuleVersion => "1.2.1";
+    public override string ModuleVersion => "1.2.2";
     public override string ModuleAuthor => "CS2-Bot-Improver";
     public override string ModuleDescription => "Adds broadcast-style observer bots that appear as spectators on the scoreboard.";
 
     private const int MaxSetupAttempts = 5;
+
+    // steamId64 = SteamId64Base + 32-bit account id (same base BotHider uses).
+    private const ulong SteamId64Base = 76561197960265728UL;
 
     private readonly ConcurrentDictionary<int, CCSPlayerController> _observers = new();
     private readonly ConcurrentDictionary<int, string> _pendingObservers = new();
@@ -29,6 +32,9 @@ public class BotObserverPlugin : BasePlugin
 
     // Key: lowercase name, Value: canonical spelling from bot_info.json
     private readonly Dictionary<string, string> _namePool = new(StringComparer.OrdinalIgnoreCase);
+
+    // Key: canonical spelling, Value: 32-bit account id from the bot_info.json key.
+    private readonly Dictionary<string, uint> _nameSteamIds = new(StringComparer.Ordinal);
 
     public override void Load(bool hotReload)
     {
@@ -38,6 +44,11 @@ public class BotObserverPlugin : BasePlugin
         AddCommandListener("bot_kick", OnBotKick, HookMode.Pre);
         RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
+
+        // Watchdog: BotHider builds with round-start respawn/team logic treat a
+        // Spectator observer as a dead managed bot and pull it into T/CT, so
+        // re-assert Spectator + SteamID every second.
+        AddTimer(1.0f, EnforceObservers, TimerFlags.REPEAT);
     }
 
     public override void Unload(bool hotReload)
@@ -49,7 +60,46 @@ public class BotObserverPlugin : BasePlugin
     private HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
     {
         LogObserverStateAtRoundStart();
+        EnforceObservers();
         return HookResult.Continue;
+    }
+
+    // Re-asserts Spectator + SteamID for every tracked observer. Round-start
+    // respawn/team logic in older BotHider builds treats a Spectator observer
+    // as a dead managed bot and pulls it into T/CT; this pulls it back.
+    private void EnforceObservers()
+    {
+        if (_observers.IsEmpty)
+            return;
+
+        foreach (var observer in _observers.Values)
+        {
+            if (observer == null || !observer.IsValid)
+                continue;
+
+            if (observer.TeamNum != (int)CsTeam.Spectator)
+            {
+                Logger.LogWarning("[BotObserver] Observer \"{Name}\" left Spectator (team {Team}); moving back.",
+                    observer.PlayerName, observer.TeamNum);
+                observer.ChangeTeam(CsTeam.Spectator);
+                ApplyObserverState(observer);
+            }
+
+            if (_nameSteamIds.TryGetValue(observer.PlayerName, out uint accountId))
+            {
+                ulong expected = SteamId64Base + accountId;
+                if (observer.SteamID != expected)
+                {
+                    var api = new PluginCapability<IBotHiderApi>("bothider:api").Get();
+                    if (api != null && observer.Slot >= 0 && api.IsManagedBot(observer.Slot) &&
+                        api.SetBotSteamId(observer.Slot, expected))
+                    {
+                        Logger.LogInformation("[BotObserver] Re-applied SteamID for \"{Name}\".",
+                            observer.PlayerName);
+                    }
+                }
+            }
+        }
     }
 
     private void LoadPlayerNamesFromBotInfo()
@@ -69,16 +119,25 @@ public class BotObserverPlugin : BasePlugin
 
             foreach (var entry in players.EnumerateObject())
             {
-                if (entry.Value.TryGetProperty("player_name", out var nameElement) &&
-                    nameElement.ValueKind == JsonValueKind.String)
-                {
-                    var name = nameElement.GetString();
-                    if (!string.IsNullOrWhiteSpace(name))
-                        _namePool[name] = name;
-                }
+                if (!entry.Value.TryGetProperty("player_name", out var nameElement) ||
+                    nameElement.ValueKind != JsonValueKind.String)
+                    continue;
+
+                var name = nameElement.GetString();
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+
+                _namePool[name] = name;
+
+                // The players key is the 32-bit account id; remember it so the
+                // observer can claim its real SteamID instead of whatever BotHider
+                // assigned while it was still named "loopback".
+                if (uint.TryParse(entry.Name, out uint accountId) && accountId != 0)
+                    _nameSteamIds.TryAdd(name, accountId);
             }
 
-            Logger.LogInformation("[BotObserver] Unified name pool: {Count} entries.", _namePool.Count);
+            Logger.LogInformation("[BotObserver] Unified name pool: {Count} entries ({SidCount} with SteamIDs).",
+                _namePool.Count, _nameSteamIds.Count);
         }
         catch (Exception e)
         {
@@ -115,7 +174,9 @@ public class BotObserverPlugin : BasePlugin
 
         // Empty-shell fake client: never joins T/CT, so the engine never counts
         // a missing player and never grants shorthanded compensation.
-        int slot = CreateFakeClientNative();
+        // Born with the final name so BotHider adopts it with the matching
+        // bot_info.json identity (name + SteamID) instead of a random one.
+        int slot = CreateFakeClientNative(name);
         if (slot < 0)
         {
             info.ReplyToCommand("[BotObserver] Failed to create fake client.");
@@ -271,15 +332,34 @@ public class BotObserverPlugin : BasePlugin
             return;
 
         var api = new PluginCapability<IBotHiderApi>("bothider:api").Get();
-        bool named = false;
+        if (api == null || player.Slot < 0)
+        {
+            player.PlayerName = name;
+            Utilities.SetStateChanged(player, "CBasePlayerController", "m_iszPlayerName");
+            return;
+        }
 
-        if (api != null && player.Slot >= 0 && api.IsManagedBot(player.Slot))
+        bool named = false;
+        if (api.IsManagedBot(player.Slot))
             named = api.SetPersonaName(player.Slot, name);
 
         if (!named)
         {
             player.PlayerName = name;
             Utilities.SetStateChanged(player, "CBasePlayerController", "m_iszPlayerName");
+        }
+
+        // BotHider adopts the shell before the rename lands and assigns a random
+        // identity, so claim the real SteamID explicitly when bot_info has one.
+        if (_nameSteamIds.TryGetValue(name, out uint accountId))
+        {
+            ulong expected = SteamId64Base + accountId;
+            if (player.SteamID != expected && api.IsManagedBot(player.Slot))
+            {
+                bool sidOk = api.SetBotSteamId(player.Slot, expected);
+                Logger.LogInformation("[BotObserver] Identity for \"{Name}\": steam {Sid} -> {Ok}.",
+                    name, expected, sidOk);
+            }
         }
     }
 
@@ -314,7 +394,7 @@ public class BotObserverPlugin : BasePlugin
         return free.Count > 0 ? free[_rng.Next(free.Count)] : $"Observer {_observers.Count + 1}";
     }
 
-    private unsafe int CreateFakeClientNative()
+    private unsafe int CreateFakeClientNative(string? name)
     {
         nint enginePtr = ValveInterface.Engine.Pointer;
         if (enginePtr == nint.Zero)
@@ -323,7 +403,10 @@ public class BotObserverPlugin : BasePlugin
         nint vtable = Marshal.ReadIntPtr(enginePtr);
         nint cfcFnPtr = Marshal.ReadIntPtr(vtable + 52 * 8);
 
-        nint addrPtr = Marshal.StringToHGlobalAnsi("loopback");
+        // The engine names the fake client after szNetName. Non-ASCII names may
+        // garble through the ANSI marshalling; the 0.1s setup renames + re-SIDs.
+        string clientName = string.IsNullOrEmpty(name) ? "loopback" : name;
+        nint addrPtr = Marshal.StringToHGlobalAnsi(clientName);
         nint retBuf = Marshal.AllocHGlobal(8);
         Marshal.WriteInt64(retBuf, -1);
 
